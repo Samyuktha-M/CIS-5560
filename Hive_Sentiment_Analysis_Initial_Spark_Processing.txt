@@ -1,0 +1,231 @@
+
+# Download the dataset files to the local system from the links provided
+
+# Dataset URLs:​
+
+## https://public.opendatasoft.com/explore/dataset/airbnb-listings/table/?disjunctive.host_verifications&disjunctive.amenities&disjunctive.features ​
+
+## https://www.kaggle.com/samyukthamurali/airbnb-ratings-dataset?select=airbnb-reviews.csv ​
+
+
+# Transfer the files to remotely located SCU Hadoop Cluster using scp
+scp /Users/samyukthamuralidharan/Desktop/CIS_5200/5200_Project/airbnb-listings.csv smurali2@220.116.230.22:~ 
+
+scp /Users/samyukthamuralidharan/Desktop/CIS_5200/5200_Project/airbnb-reviews.csv.zip smurali2@220.116.230.22:~ 
+
+scp /Users/samyukthamuralidharan/Desktop/CIS_5200/5200_Project/dictionary.tsv smurali2@220.116.230.22:~ 
+
+
+# In the shell terminal type in the ssh command to connect to the Hadoop Cluster
+samyukthamuralidharan$ ssh smurali2@220.116.230.22 
+
+# Check if the files are transferred to the remote machine
+-bash-4.2$ ls 
+airbnb-listings.csv  airbnb-reviews.csv.zip dictionary.tsv 
+
+# Unzip the airbnb-reviews.csv.zip file
+
+-bash-4.2$ unzip airbnb-reviews.csv.zip 
+
+# Check if the file is unzipped using ls command
+-bash-4.2$ ls 
+
+airbnb-listings.csv  airbnb-reviews.csv  airbnb-reviews.csv.zip dictionary.tsv 
+
+# Create directories in HDFS and store the files in the respective folders
+
+-bash-4.2$ hdfs dfs –mkdir hive_sentiment_analysis 
+
+-bash-4.2$ hdfs dfs -mkdir hive_sentiment_analysis/airbnb_reviews 
+
+-bash-4.2$ hdfs dfs -put airbnb-reviews.csv hive_sentiment_analysis/airbnb_reviews 
+
+-bash-4.2$ hdfs dfs -ls hive_sentiment_analysis/airbnb_reviews 
+Found 1 items 
+
+-rw-r--r--   3 smurali2 hdfs 3216764625 2021-04-17 10:58 hive_sentiment_analysis/airbnb_reviews/airbnb-reviews.csv 
+
+-bash-4.2$ hdfs dfs -mkdir hive_sentiment_analysis/dictionary 
+
+-bash-4.2$ hdfs dfs -put dictionary.tsv hive_sentiment_analysis/dictionary 
+
+-bash-4.2$ hdfs dfs -ls hive_sentiment_analysis/dictionary 
+
+Found 1 items 
+
+-rw-r--r--   3 smurali2 hdfs          0 2021-04-17 11:00 hive_sentiment_analysis/dictionary/dictionary.tsv 
+
+# Run the following HDFS command to make the beeline command work for the new folder 'hive_sentiment_analysis'
+-bash-4.2$ hdfs dfs -chmod -R o+w hive_sentiment_analysis/
+
+------- Hive Sentiment Analysis-------
+
+# Connect to Beeline CLI
+-bash-4.2$ beeline
+
+# Creating your own database with your username to separate your tables from other users' tables
+
+0: jdbc:hive2://bigdata3.iscu.ac.kr:2181,bigd> CREATE DATABASE IF NOT EXISTS smurali2;
+
+# Use the database created for further analysis
+0: jdbc:hive2://bigdata3.iscu.ac.kr:2181,bigd> use smurali2;
+
+# Creating an external table for 'airbnb_reviews'
+CREATE EXTERNAL TABLE airbnb_reviews(Listing_ID BigInt,ID BigInt,Date_Of_Review Date,Reviewer_ID BigInt,Reviewer_Name String,Comments String)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ';'
+STORED AS TEXTFILE LOCATION '/user/smurali2/hive_sentiment_analysis/airbnb_reviews'
+TBLPROPERTIES ('skip.header.line.count'='1');
+
+# Overwriting 'airbnb_reviews' table to filter null comments
+INSERT OVERWRITE TABLE airbnb_reviews SELECT * from airbnb_reviews where comments IS NOT NULL;
+
+# Creating an external table 'Dictionary' 
+CREATE EXTERNAL TABLE if not exists Dictionary(type string,
+length int,
+word string,
+pos string, stemmed string,polarity string)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+STORED AS TEXTFILE
+LOCATION '/user/smurali2/hive_sentiment_analysis/dictionary';
+
+# The below code is used in Hive to determine the sentiment of the reviews
+create view IF NOT EXISTS v1 as
+select listing_id, words
+from airbnb_reviews
+lateral view explode(sentences(lower(comments))) dummy as words;
+
+create view IF NOT EXISTS v2 as
+select listing_ID, word
+from v1
+lateral view explode(words) dummy as word;
+
+create view IF NOT EXISTS v3 as select listing_id,
+v2.word,
+case d.polarity
+when 'negative' then -1 when 'positive' then 1 else 0 end as polarity
+from v2 left outer join Dictionary d on v2.word = d.word;
+
+create view IF NOT EXISTS v3 as select Listing_ID,
+v2.word,
+case d.polarity
+when 'negative' then -1 when 'positive' then 1 else 0 end as polarity
+from v2 left outer join Dictionary d on v2.word = d.word;
+
+create table IF NOT EXISTS airbnb_sentiment stored as orc as select
+listing_id,case
+when sum( polarity ) > 0 then 'positive' when sum( polarity ) < 0 then 'negative' else 'neutral' end as sentiment
+from v3 GROUP BY listing_id;
+
+# Create a directory to store the results
+-bash-4.2$ hdfs dfs -mkdir hive_sentiment_analysis/sentiment
+
+# Creating a table 'sentiment_polarity'
+CREATE TABLE IF NOT EXISTS sentiment_polarity
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ","
+STORED AS TEXTFILE
+LOCATION "/user/smurali2/hive_sentiment_analysis/sentiment" AS SELECT
+s.listing_id as Listing_ID,
+case s.sentiment
+    when 'positive' then 2
+    when 'neutral' then 1
+    when 'negative' then 0
+end as sentiment
+FROM airbnb_sentiment s;
+
+# Check if the table is created in the location
+-bash-4.2$ hdfs dfs -ls hive_sentiment_analysis/sentiment 
+
+Found 1 items 
+
+-rw-r--r--   3 smurali2 hdfs    3889074 2021-04-17 12:29 hive_sentiment_analysis/sentiment/000000_0 
+
+# Download the file to the master node of the cluster
+-bash-4.2$ hdfs dfs -get hive_sentiment_analysis/sentiment/000000_0 airbnb_sentiment.csv 
+
+# Put the following files in the created directory 'airbnb_dataset'
+-bash-4.2$ hdfs dfs -mkdir airbnb_dataset 
+
+-bash-4.2$ hdfs dfs -put airbnb_sentiment.csv airbnb_dataset 
+
+-bash-4.2$ hdfs dfs -put airbnb-listings.csv airbnb_dataset 
+
+
+-----pyspark------
+
+# Connect to pyspark 
+-bash-4.2$ pyspark
+
+# Creating a dataframe for 'airbnb-listings.csv' file
+file_location = "/user/smurali2/airbnb_dataset/airbnb-listings.csv"  
+
+file_type = "csv"  
+
+# CSV options  
+
+infer_schema = "true"  
+
+first_row_is_header = "true"   
+
+delimiter = ";"  
+
+df_listings= spark.read.format(file_type).option("inferSchema", infer_schema).option("header", first_row_is_header).option("sep", delimiter).load(file_location) 
+
+# Creating a dataframe for 'airbnb_sentiment.csv' file
+file_location = "/user/smurali2/airbnb_dataset/airbnb_sentiment.csv"   
+
+file_type = "csv"  
+
+infer_schema = "true"   
+
+first_row_is_header = "false"  
+
+delimiter = ","    
+
+df_reviews = spark.read.format(file_type).option("inferSchema", infer_schema).option("header", first_row_is_header).option("sep", delimiter).load(file_location) 
+
+# Rename the columns in the df_reviews dataframe
+df_reviews = df_reviews.withColumnRenamed("_c0","Listing_ID")
+df_reviews = df_reviews.withColumnRenamed("_c1","Sentiment")
+
+# Do a left-outer join of the two dataframes to match the listings of both the dataframes
+joined_df = df_listings.join(df_reviews,df_listings.ID == df_reviews.Listing_ID,how='left_outer') 
+
+# Filter the dataframe for only 'United States'
+airbnb_US = joined_df.filter(joined_df.Country  == "United States")
+
+# Sampling the data
+sample_df = airbnb_US.sample(0.075) 
+sample_df.write.format('csv').option('header',False).save('/user/smurali2/output.csv') 
+
+# Merging the sampled files
+-bash-4.2$ hdfs dfs -getmerge output.csv airbnb_sample.csv  
+
+# Transfer the sampled file to local system using scp
+samyukthamuralidharan$ scp smurali2@220.116.230.22:~/airbnb_sample.csv .
+
+# Save the dataframe 'airbnb_US' as a csv file to HDFS
+
+>> airbnb_US.coalesce(1).write.csv('/user/smurali2/airbnb_US', header=True) 
+
+-bash-4.2$ hdfs dfs -ls airbnb_US 
+
+Found 2 items 
+
+-rw-r--r--   3 smurali2 hdfs          0 2021-05-01 12:54 airbnb_US/_SUCCESS 
+
+-rw-r--r--   3 smurali2 hdfs   70115967 2021-05-01 12:54 airbnb_US/part-00000-f7aef4df-d833-410a-849c-d3fc55ca8872-c000.csv 
+
+# Move the csv file to the 'airbnb_dataset' folder by renaming it
+
+hdfs dfs -mv /user/smurali2/airbnb_US/part-00000-0567a22c-423e-4b84-a104-dab1e99cade6-c000.csv /user/smurali2/airbnb_dataset/airbnb_US.csv  
+
+-bash-4.2$ hdfs dfs -ls airbnb_dataset 
+Found 4 items 
+-rw-r--r--   3 smurali2 hdfs 1926083898 2021-05-07 09:38 airbnb_dataset/airbnb-listings.csv
+-rw-r--r--   3 smurali2 hdfs  388484551 2021-05-07 09:42 airbnb_dataset/airbnb_US.csv
+-rw-r--r--   3 smurali2 hdfs    3889074 2021-05-07 09:38 airbnb_dataset/airbnb_sentiment.csv
+
+ 
